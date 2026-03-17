@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS group_members (
 CREATE TABLE IF NOT EXISTS group_rules (
   id           UUID       PRIMARY KEY DEFAULT uuid_generate_v4(),
   group_id     UUID       NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
-  emoji        VARCHAR(10) DEFAULT 'x1F4CC',
+  emoji        VARCHAR(10) DEFAULT '📌',
   title        VARCHAR(200) NOT NULL,
   description  TEXT,
   is_default   BOOLEAN     DEFAULT FALSE,
@@ -216,7 +216,7 @@ CREATE TABLE IF NOT EXISTS accessories (
   size           VARCHAR(20),
   color          VARCHAR(50),
   store          VARCHAR(200),
-  emoji          VARCHAR(10)  DEFAULT 'x1F3CD',
+  emoji          VARCHAR(10)  DEFAULT '🏍',
   bike_name      VARCHAR(200),
   image_url      TEXT,
   notes          TEXT,

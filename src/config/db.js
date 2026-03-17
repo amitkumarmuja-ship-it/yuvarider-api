@@ -30,9 +30,4 @@ const pool = new Pool({
   }
 });
 
-if (!process.env.DATABASE_URL) {
-  console.error("❌ DATABASE_URL is missing");
-  process.exit(1);
-}
-
 module.exports = pool;
