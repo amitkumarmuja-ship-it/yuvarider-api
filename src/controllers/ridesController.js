@@ -1,10 +1,49 @@
 const pool = require('../config/db');
 require('dotenv').config();
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Given a start_date string (YYYY-MM-DD) and a 1-based day_number,
+ * returns a human label like "Day 1 - Monday".
+ */
+function buildDayLabel(startDateStr, dayNumber) {
+  try {
+    const base = new Date(startDateStr);
+    base.setDate(base.getDate() + dayNumber - 1);
+    const weekday = base.toLocaleDateString('en-US', { weekday: 'long' });
+    return `Day ${dayNumber} - ${weekday}`;
+  } catch {
+    return `Day ${dayNumber}`;
+  }
+}
+
+/**
+ * Groups a flat waypoints array (sorted by day_number, sort_order) into
+ * itinerary days used by RideDetailScreen:
+ *   [{ day_number, day_label, stops: [{ name, stop_time, type, ... }] }]
+ */
+function groupWaypointsByDay(waypoints, startDate) {
+  const map = new Map();
+  for (const wp of waypoints) {
+    const dayNum = wp.day_number || 1;
+    if (!map.has(dayNum)) map.set(dayNum, []);
+    map.get(dayNum).push(wp);
+  }
+  const itinerary = [];
+  for (const [dayNum, stops] of [...map.entries()].sort((a, b) => a[0] - b[0])) {
+    itinerary.push({
+      day_number: dayNum,
+      day_label:  buildDayLabel(startDate, dayNum),
+      stops,
+    });
+  }
+  return itinerary;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/v1/rides
 // Query: tab (upcoming|past|my_rides), page, limit, status
-// FIX: Removed SQL injection — userId is now a proper $N parameter.
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getRides = async (req, res, next) => {
   try {
@@ -22,7 +61,7 @@ exports.getRides = async (req, res, next) => {
     } else if (tab === 'my_rides') {
       if (!userId)
         return res.json({ success: true, total: 0, page: 1, limit: parseInt(limit), rides: [] });
-      params.push(userId); // $1
+      params.push(userId);
       whereClause += ` AND (r.created_by = $1 OR EXISTS (
         SELECT 1 FROM ride_participants rp WHERE rp.ride_id = r.id AND rp.user_id = $1
       ))`;
@@ -31,15 +70,12 @@ exports.getRides = async (req, res, next) => {
       whereClause += ` AND r.status = $${params.length}`;
     }
 
-    const countRes = await pool.query(
-      `SELECT COUNT(*) FROM rides r ${whereClause}`, params
-    );
+    const countRes = await pool.query(`SELECT COUNT(*) FROM rides r ${whereClause}`, params);
 
     const limitIdx  = params.length + 1;
     const offsetIdx = params.length + 2;
     params.push(parseInt(limit), offset);
 
-    // is_joined — safe parameterised sub-select
     let isJoinedExpr = 'FALSE';
     if (userId) {
       params.push(userId);
@@ -83,6 +119,7 @@ exports.getRides = async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/v1/rides/:id
+// Returns full ride detail including grouped itinerary days for RideDetailScreen
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getRideById = async (req, res, next) => {
   try {
@@ -92,9 +129,9 @@ exports.getRideById = async (req, res, next) => {
     const rideRes = await pool.query(`
       SELECT r.*,
         u.id  AS host_id, u.name AS host_name, u.avatar_url AS host_avatar,
-        lu.name AS lead_rider_name,
-        mu.name AS marshal_name,
-        su.name AS sweep_name,
+        lu.id   AS lead_rider_id_val, lu.name AS lead_rider_name, lu.avatar_url AS lead_rider_avatar,
+        mu.id   AS marshal_id_val,    mu.name AS marshal_name,    mu.avatar_url AS marshal_avatar,
+        su.id   AS sweep_id_val,      su.name AS sweep_name,      su.avatar_url AS sweep_avatar,
         (SELECT COUNT(*) FROM ride_participants rp
          WHERE rp.ride_id = r.id AND rp.status = 'confirmed') AS participant_count
       FROM rides r
@@ -112,13 +149,26 @@ exports.getRideById = async (req, res, next) => {
 
     const [waypointsRes, participantsRes, expensesRes, weatherRes, requestsRes] =
       await Promise.all([
-        pool.query(`SELECT * FROM ride_waypoints WHERE ride_id=$1 ORDER BY sort_order`, [id]),
+        // Order by day_number then sort_order for correct grouping
+        pool.query(
+          `SELECT * FROM ride_waypoints WHERE ride_id=$1
+           ORDER BY COALESCE(day_number,1) ASC, sort_order ASC`,
+          [id]
+        ),
         pool.query(`
           SELECT rp.role, rp.status, rp.joined_at,
-                 u.id, u.name, u.avatar_url, u.phone
+                 u.id, u.name, u.avatar_url, u.phone, u.location
           FROM ride_participants rp
           JOIN users u ON u.id = rp.user_id
           WHERE rp.ride_id = $1 AND rp.status = 'confirmed'
+          ORDER BY
+            CASE rp.role
+              WHEN 'host'       THEN 1
+              WHEN 'lead_rider' THEN 2
+              WHEN 'marshal'    THEN 3
+              WHEN 'sweep'      THEN 4
+              ELSE 5
+            END, rp.joined_at
         `, [id]),
         pool.query(`
           SELECT re.*, u.name AS paid_by_name
@@ -128,17 +178,31 @@ exports.getRideById = async (req, res, next) => {
         `, [id]),
         pool.query(`SELECT * FROM ride_weather WHERE ride_id = $1`, [id]),
         userId
-          ? pool.query(`SELECT status FROM ride_requests WHERE ride_id=$1 AND user_id=$2`, [id, userId])
+          ? pool.query(
+              `SELECT status FROM ride_requests WHERE ride_id=$1 AND user_id=$2`,
+              [id, userId]
+            )
           : { rows: [] },
       ]);
 
     const totalExpenses = expensesRes.rows.reduce((s, e) => s + parseFloat(e.amount || 0), 0);
 
+    // ── Build grouped itinerary (NEW — used by RideDetailScreen) ──────────────
+    const itinerary = groupWaypointsByDay(
+      waypointsRes.rows,
+      ride.start_date   // e.g. "2024-12-02"
+    );
+
+    // ── Total stops count across all days ────────────────────────────────────
+    const totalStops = waypointsRes.rows.length;
+
     res.json({
       success: true,
       ride: {
         ...ride,
-        waypoints:      waypointsRes.rows,
+        waypoints:      waypointsRes.rows,    // flat array (legacy compat)
+        itinerary,                            // grouped by day (for RideDetailScreen)
+        total_stops:    totalStops,
         participants:   participantsRes.rows,
         expenses:       expensesRes.rows,
         total_expenses: totalExpenses,
@@ -184,13 +248,13 @@ exports.createRide = async (req, res, next) => {
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
       RETURNING *
     `, [
-      req.user.id, name, description||null, source, destination,
-      start_date, start_time, end_date||null, end_time||null,
-      distance_km||null, duration_hrs||null,
-      cover_photo||null, cover_photo_name||null,
-      ride_type||'Public', is_paid||false, entry_fee||0, max_participants||20,
-      tags||[], scenic||false,
-      lead_rider_id||null, marshal_id||null, sweep_id||null, group_id||null,
+      req.user.id, name, description || null, source, destination,
+      start_date, start_time, end_date || null, end_time || null,
+      distance_km || null, duration_hrs || null,
+      cover_photo || null, cover_photo_name || null,
+      ride_type || 'Public', is_paid || false, entry_fee || 0, max_participants || 20,
+      tags || [], scenic || false,
+      lead_rider_id || null, marshal_id || null, sweep_id || null, group_id || null,
     ]);
     const ride = rideRes.rows[0];
 
@@ -202,9 +266,15 @@ exports.createRide = async (req, res, next) => {
     for (let i = 0; i < waypoints.length; i++) {
       const wp = waypoints[i];
       await client.query(
-        `INSERT INTO ride_waypoints (ride_id, name, stop_time, type, sort_order, lat, lng)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [ride.id, wp.name, wp.stop_time||null, wp.type||'stop', wp.sort_order??i+1, wp.lat||null, wp.lng||null]
+        `INSERT INTO ride_waypoints
+           (ride_id, name, stop_time, type, sort_order, day_number, lat, lng)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [
+          ride.id, wp.name, wp.stop_time || null,
+          wp.type || 'stop', wp.sort_order ?? i + 1,
+          wp.day_number || 1,
+          wp.lat || null, wp.lng || null,
+        ]
       );
     }
 
@@ -277,7 +347,7 @@ exports.deleteRide = async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/v1/rides/:id/join
-// FIX: Returns 409 Conflict if request already exists; checks ride status
+// Creates a join request (pending) — host approves via respondRequest
 // ─────────────────────────────────────────────────────────────────────────────
 exports.joinRide = async (req, res, next) => {
   try {
@@ -307,15 +377,48 @@ exports.joinRide = async (req, res, next) => {
       return res.status(409).json({
         success: false,
         message: `Join request already ${existing.rows[0].status}`,
-        status: existing.rows[0].status,
+        status:  existing.rows[0].status,
       });
 
     await pool.query(
       `INSERT INTO ride_requests (ride_id, user_id, message) VALUES ($1,$2,$3)`,
-      [id, userId, message||null]
+      [id, userId, message || null]
     );
     res.status(201).json({ success: true, message: 'Join request sent' });
   } catch (err) { next(err); }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/v1/rides/:id/leave  — NEW: leave a ride you've joined
+// Removes the participant record and any pending/approved request
+// ─────────────────────────────────────────────────────────────────────────────
+exports.leaveRide = async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    // Cannot leave if you're the host
+    const rideRes = await client.query('SELECT created_by FROM rides WHERE id=$1', [id]);
+    if (!rideRes.rows.length)
+      return res.status(404).json({ success: false, message: 'Ride not found' });
+    if (rideRes.rows[0].created_by === userId)
+      return res.status(400).json({ success: false, message: 'Host cannot leave their own ride' });
+
+    await client.query('BEGIN');
+    await client.query(
+      `DELETE FROM ride_participants WHERE ride_id=$1 AND user_id=$2`, [id, userId]
+    );
+    await client.query(
+      `DELETE FROM ride_requests WHERE ride_id=$1 AND user_id=$2`, [id, userId]
+    );
+    await client.query('COMMIT');
+
+    res.json({ success: true, message: 'Left ride successfully' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally { client.release(); }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -348,11 +451,17 @@ exports.cloneRide = async (req, res, next) => {
     ]);
     const clonedId = newRide.rows[0].id;
 
-    const wps = await client.query(`SELECT * FROM ride_waypoints WHERE ride_id=$1 ORDER BY sort_order`, [id]);
+    // Copy waypoints including new day_number field
+    const wps = await client.query(
+      `SELECT * FROM ride_waypoints WHERE ride_id=$1 ORDER BY COALESCE(day_number,1), sort_order`,
+      [id]
+    );
     for (const wp of wps.rows) {
       await client.query(
-        `INSERT INTO ride_waypoints (ride_id, name, stop_time, type, sort_order, lat, lng) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [clonedId, wp.name, wp.stop_time, wp.type, wp.sort_order, wp.lat, wp.lng]
+        `INSERT INTO ride_waypoints
+           (ride_id, name, stop_time, type, sort_order, day_number, lat, lng)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [clonedId, wp.name, wp.stop_time, wp.type, wp.sort_order, wp.day_number || 1, wp.lat, wp.lng]
       );
     }
 
@@ -382,9 +491,10 @@ exports.getParticipants = async (req, res, next) => {
       JOIN users u ON u.id = rp.user_id
       WHERE rp.ride_id = $1
       ORDER BY
-        CASE rp.role WHEN 'host' THEN 1 WHEN 'lead_rider' THEN 2
-          WHEN 'marshal' THEN 3 WHEN 'sweep' THEN 4 ELSE 5 END,
-        rp.joined_at
+        CASE rp.role
+          WHEN 'host'       THEN 1 WHEN 'lead_rider' THEN 2
+          WHEN 'marshal'    THEN 3 WHEN 'sweep'       THEN 4 ELSE 5
+        END, rp.joined_at
     `, [req.params.id]);
     res.json({ success: true, participants: r.rows });
   } catch (err) { next(err); }
@@ -396,7 +506,8 @@ exports.getParticipants = async (req, res, next) => {
 exports.getWaypoints = async (req, res, next) => {
   try {
     const r = await pool.query(
-      `SELECT * FROM ride_waypoints WHERE ride_id=$1 ORDER BY sort_order`, [req.params.id]
+      `SELECT * FROM ride_waypoints WHERE ride_id=$1 ORDER BY COALESCE(day_number,1), sort_order`,
+      [req.params.id]
     );
     res.json({ success: true, waypoints: r.rows });
   } catch (err) { next(err); }
@@ -426,7 +537,6 @@ exports.getRequests = async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/v1/rides/:id/requests/:requestId  — approve / reject
-// FIX: Checks if request is still pending; enforces capacity before approving
 // ─────────────────────────────────────────────────────────────────────────────
 exports.respondRequest = async (req, res, next) => {
   const client = await pool.connect();
@@ -444,13 +554,22 @@ exports.respondRequest = async (req, res, next) => {
     await client.query('BEGIN');
 
     const reqRes = await client.query('SELECT * FROM ride_requests WHERE id=$1 AND ride_id=$2', [requestId, id]);
-    if (!reqRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ success: false, message: 'Request not found' }); }
+    if (!reqRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: 'Request not found' });
+    }
 
     const rr = reqRes.rows[0];
-    if (rr.status !== 'pending') { await client.query('ROLLBACK'); return res.status(400).json({ success: false, message: `Request already ${rr.status}` }); }
+    if (rr.status !== 'pending') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, message: `Request already ${rr.status}` });
+    }
 
     const newStatus = action === 'approve' ? 'approved' : 'rejected';
-    await client.query(`UPDATE ride_requests SET status=$1, responded_at=NOW() WHERE id=$2`, [newStatus, requestId]);
+    await client.query(
+      `UPDATE ride_requests SET status=$1, responded_at=NOW() WHERE id=$2`,
+      [newStatus, requestId]
+    );
 
     if (action === 'approve') {
       const countRes = await client.query(
@@ -490,14 +609,16 @@ exports.updateStatus = async (req, res, next) => {
     if (rideRes.rows[0].created_by !== req.user.id)
       return res.status(403).json({ success: false, message: 'Not authorised' });
 
-    const r = await pool.query(`UPDATE rides SET status=$1, updated_at=NOW() WHERE id=$2 RETURNING id, status`, [status, id]);
+    const r = await pool.query(
+      `UPDATE rides SET status=$1, updated_at=NOW() WHERE id=$2 RETURNING id, status`,
+      [status, id]
+    );
     res.json({ success: true, message: `Ride status updated to ${status}`, ride: r.rows[0] });
   } catch (err) { next(err); }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/v1/rides/:id/expenses
-// FIX: Validates the caller is a confirmed participant or host
 // ─────────────────────────────────────────────────────────────────────────────
 exports.addRideExpense = async (req, res, next) => {
   try {
@@ -519,7 +640,7 @@ exports.addRideExpense = async (req, res, next) => {
     const r = await pool.query(`
       INSERT INTO ride_expenses (ride_id, paid_by_id, name, amount, category, payment_method, location, notes)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
-    `, [id, req.user.id, name, amount, category||'Other', payment_method||'cash', location||null, notes||null]);
+    `, [id, req.user.id, name, amount, category || 'Other', payment_method || 'cash', location || null, notes || null]);
 
     res.status(201).json({ success: true, expense: r.rows[0] });
   } catch (err) { next(err); }
@@ -536,7 +657,7 @@ exports.addFavouriteLocation = async (req, res, next) => {
 
     const r = await pool.query(
       `INSERT INTO favourite_locations (user_id, ride_id, name, lat, lng) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [req.user.id, id, name, lat||null, lng||null]
+      [req.user.id, id, name, lat || null, lng || null]
     );
     res.status(201).json({ success: true, location: r.rows[0] });
   } catch (err) { next(err); }
