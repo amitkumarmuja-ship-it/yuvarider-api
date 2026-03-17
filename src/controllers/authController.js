@@ -41,9 +41,17 @@ exports.login = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Email and password required' });
 
     const r = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
-   
+   if (!r.rows.length) {
+  return res.status(401).json({ success: false, message: 'Invalid credentials' });
+}
+
+const user = r.rows[0];
+
+if (!(await bcrypt.compare(password, user.password_hash))) {
+  return res.status(401).json({ success: false, message: 'Invalid credentials' });
+}
     
-    const user = r.rows[0];
+    // const user = r.rows[0];
     //  console.log(bcrypt.compare(password, user.password_hash));
     // console.log(password);
     // console.log(user.password_hash);
