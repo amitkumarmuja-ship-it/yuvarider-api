@@ -656,20 +656,46 @@ exports.addFavouriteLocation = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /api/v1/users/search — search users by name/email (for role assignment)
-// Registered in auth.js as: router.get('/search', auth, ctrl.searchUsers)
+// GET /api/v1/auth/users/search
+// FIXED: Returns ALL active users when q is empty so the modal can show a
+//         full rider list immediately on open (no typing required).
+//         When q is provided, filters by name or email (case-insensitive).
+//         Also returns primary vehicle info for display in the picker.
 // ─────────────────────────────────────────────────────────────────────────────
 exports.searchUsers = async (req, res, next) => {
   try {
-    const { q = '', limit = 20 } = req.query;
-    const query = `%${String(q).trim()}%`;
-    const r = await pool.query(`
-      SELECT id, name, email, avatar_url, location, total_rides
-      FROM users
-      WHERE (name ILIKE $1 OR email ILIKE $1) AND id != $2 AND is_active = TRUE
-      ORDER BY name ASC
-      LIMIT $3
-    `, [query, req.user.id, parseInt(limit)]);
+    const { q = '', limit = 50 } = req.query;
+    const trimmed = String(q).trim();
+    const lim = Math.min(parseInt(limit) || 50, 100);
+
+    let r;
+    if (!trimmed) {
+      // No query → return ALL active users except self, sorted by total_rides desc
+      r = await pool.query(`
+        SELECT
+          u.id, u.name, u.email, u.avatar_url, u.location, u.total_rides, u.bio,
+          v.name AS bike_name, v.brand AS bike_brand, v.model AS bike_model
+        FROM users u
+        LEFT JOIN vehicles v ON v.user_id = u.id AND v.is_primary = TRUE
+        WHERE u.id != $1 AND u.is_active = TRUE
+        ORDER BY u.total_rides DESC, u.name ASC
+        LIMIT $2
+      `, [req.user.id, lim]);
+    } else {
+      // Has query → filter by name or email
+      const pattern = `%${trimmed}%`;
+      r = await pool.query(`
+        SELECT
+          u.id, u.name, u.email, u.avatar_url, u.location, u.total_rides, u.bio,
+          v.name AS bike_name, v.brand AS bike_brand, v.model AS bike_model
+        FROM users u
+        LEFT JOIN vehicles v ON v.user_id = u.id AND v.is_primary = TRUE
+        WHERE (u.name ILIKE $1 OR u.email ILIKE $1)
+          AND u.id != $2 AND u.is_active = TRUE
+        ORDER BY u.total_rides DESC, u.name ASC
+        LIMIT $3
+      `, [pattern, req.user.id, lim]);
+    }
     res.json({ success: true, users: r.rows });
   } catch (err) { next(err); }
 };
