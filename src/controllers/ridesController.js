@@ -4,24 +4,46 @@ require('dotenv').config();
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Given a start_date string (YYYY-MM-DD) and a 1-based day_number,
- * returns a human label like "Day 1 - Monday".
+ * FIXED: Parses a date string safely without timezone ambiguity.
+ * PostgreSQL DATE columns are returned as "YYYY-MM-DD" strings by the pg library.
+ * Timestamps come as "YYYY-MM-DDT..." ISO strings.
+ * Using new Date(y, m-1, d) (local time constructor) avoids UTC-midnight timezone issues.
+ */
+function parseDateSafe(dateStr) {
+  if (!dateStr) return null;
+  try {
+    // Handle both "YYYY-MM-DD" and "YYYY-MM-DDT00:00:00.000Z" formats
+    const datePart = String(dateStr).split('T')[0];
+    const parts = datePart.split('-').map(Number);
+    if (parts.length < 3 || parts.some(isNaN)) return null;
+    const [y, m, d] = parts;
+    if (y < 2000 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return new Date(y, m - 1, d); // local time — no timezone shift
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * FIXED: Builds a human label like "Day 1 - Monday".
+ * Previously used new Date(startDateStr) which parsed YYYY-MM-DD as UTC midnight
+ * and caused off-by-one weekday errors in IST (+5:30) and other positive-offset zones.
  */
 function buildDayLabel(startDateStr, dayNumber) {
+  const WEEKDAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
   try {
-    const base = new Date(startDateStr);
+    const base = parseDateSafe(startDateStr);
+    if (!base) return `Day ${dayNumber}`;
     base.setDate(base.getDate() + dayNumber - 1);
-    const weekday = base.toLocaleDateString('en-US', { weekday: 'long' });
-    return `Day ${dayNumber} - ${weekday}`;
+    return `Day ${dayNumber} - ${WEEKDAYS[base.getDay()]}`;
   } catch {
     return `Day ${dayNumber}`;
   }
 }
 
 /**
- * Groups a flat waypoints array (sorted by day_number, sort_order) into
- * itinerary days used by RideDetailScreen:
- *   [{ day_number, day_label, stops: [{ name, stop_time, type, ... }] }]
+ * Groups a flat waypoints array into itinerary days for RideDetailScreen.
+ * Returns: [{ day_number, day_label, stops: [...] }]
  */
 function groupWaypointsByDay(waypoints, startDate) {
   const map = new Map();
@@ -43,7 +65,6 @@ function groupWaypointsByDay(waypoints, startDate) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/v1/rides
-// Query: tab (upcoming|past|my_rides), page, limit, status
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getRides = async (req, res, next) => {
   try {
@@ -119,7 +140,6 @@ exports.getRides = async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/v1/rides/:id
-// Returns full ride detail including grouped itinerary days for RideDetailScreen
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getRideById = async (req, res, next) => {
   try {
@@ -149,7 +169,7 @@ exports.getRideById = async (req, res, next) => {
 
     const [waypointsRes, participantsRes, expensesRes, weatherRes, requestsRes] =
       await Promise.all([
-        // Order by day_number then sort_order for correct grouping
+        // FIXED: ORDER BY uses day_number which now exists in schema
         pool.query(
           `SELECT * FROM ride_waypoints WHERE ride_id=$1
            ORDER BY COALESCE(day_number,1) ASC, sort_order ASC`,
@@ -187,21 +207,20 @@ exports.getRideById = async (req, res, next) => {
 
     const totalExpenses = expensesRes.rows.reduce((s, e) => s + parseFloat(e.amount || 0), 0);
 
-    // ── Build grouped itinerary (NEW — used by RideDetailScreen) ──────────────
+    // FIXED: buildDayLabel now handles DATE strings from PostgreSQL correctly
     const itinerary = groupWaypointsByDay(
       waypointsRes.rows,
-      ride.start_date   // e.g. "2024-12-02"
+      ride.start_date  // PostgreSQL DATE → "YYYY-MM-DD" string
     );
 
-    // ── Total stops count across all days ────────────────────────────────────
     const totalStops = waypointsRes.rows.length;
 
     res.json({
       success: true,
       ride: {
         ...ride,
-        waypoints:      waypointsRes.rows,    // flat array (legacy compat)
-        itinerary,                            // grouped by day (for RideDetailScreen)
+        waypoints:      waypointsRes.rows,
+        itinerary,
         total_stops:    totalStops,
         participants:   participantsRes.rows,
         expenses:       expensesRes.rows,
@@ -216,7 +235,7 @@ exports.getRideById = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/v1/rides  — create ride
+// POST /api/v1/rides — create ride
 // ─────────────────────────────────────────────────────────────────────────────
 exports.createRide = async (req, res, next) => {
   const client = await pool.connect();
@@ -263,6 +282,7 @@ exports.createRide = async (req, res, next) => {
       [ride.id, req.user.id]
     );
 
+    // FIXED: INSERT includes day_number column
     for (let i = 0; i < waypoints.length; i++) {
       const wp = waypoints[i];
       await client.query(
@@ -270,10 +290,14 @@ exports.createRide = async (req, res, next) => {
            (ride_id, name, stop_time, type, sort_order, day_number, lat, lng)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
         [
-          ride.id, wp.name, wp.stop_time || null,
-          wp.type || 'stop', wp.sort_order ?? i + 1,
-          wp.day_number || 1,
-          wp.lat || null, wp.lng || null,
+          ride.id,
+          wp.name,
+          wp.stop_time || null,
+          wp.type || 'stop',
+          wp.sort_order ?? i + 1,
+          wp.day_number || 1,   // FIXED: use provided day_number, default 1
+          wp.lat || null,
+          wp.lng || null,
         ]
       );
     }
@@ -289,7 +313,7 @@ exports.createRide = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PUT /api/v1/rides/:id  — update ride (host only)
+// PUT /api/v1/rides/:id — update ride (host only)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.updateRide = async (req, res, next) => {
   try {
@@ -347,7 +371,6 @@ exports.deleteRide = async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/v1/rides/:id/join
-// Creates a join request (pending) — host approves via respondRequest
 // ─────────────────────────────────────────────────────────────────────────────
 exports.joinRide = async (req, res, next) => {
   try {
@@ -389,8 +412,7 @@ exports.joinRide = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DELETE /api/v1/rides/:id/leave  — NEW: leave a ride you've joined
-// Removes the participant record and any pending/approved request
+// DELETE /api/v1/rides/:id/leave
 // ─────────────────────────────────────────────────────────────────────────────
 exports.leaveRide = async (req, res, next) => {
   const client = await pool.connect();
@@ -398,7 +420,6 @@ exports.leaveRide = async (req, res, next) => {
     const { id } = req.params;
     const userId = req.user.id;
 
-    // Cannot leave if you're the host
     const rideRes = await client.query('SELECT created_by FROM rides WHERE id=$1', [id]);
     if (!rideRes.rows.length)
       return res.status(404).json({ success: false, message: 'Ride not found' });
@@ -406,12 +427,8 @@ exports.leaveRide = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Host cannot leave their own ride' });
 
     await client.query('BEGIN');
-    await client.query(
-      `DELETE FROM ride_participants WHERE ride_id=$1 AND user_id=$2`, [id, userId]
-    );
-    await client.query(
-      `DELETE FROM ride_requests WHERE ride_id=$1 AND user_id=$2`, [id, userId]
-    );
+    await client.query(`DELETE FROM ride_participants WHERE ride_id=$1 AND user_id=$2`, [id, userId]);
+    await client.query(`DELETE FROM ride_requests     WHERE ride_id=$1 AND user_id=$2`, [id, userId]);
     await client.query('COMMIT');
 
     res.json({ success: true, message: 'Left ride successfully' });
@@ -451,7 +468,7 @@ exports.cloneRide = async (req, res, next) => {
     ]);
     const clonedId = newRide.rows[0].id;
 
-    // Copy waypoints including new day_number field
+    // FIXED: copies day_number when cloning waypoints
     const wps = await client.query(
       `SELECT * FROM ride_waypoints WHERE ride_id=$1 ORDER BY COALESCE(day_number,1), sort_order`,
       [id]
@@ -536,7 +553,7 @@ exports.getRequests = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PUT /api/v1/rides/:id/requests/:requestId  — approve / reject
+// PUT /api/v1/rides/:id/requests/:requestId — approve / reject
 // ─────────────────────────────────────────────────────────────────────────────
 exports.respondRequest = async (req, res, next) => {
   const client = await pool.connect();
