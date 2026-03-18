@@ -85,3 +85,35 @@ exports.updateMe = async (req, res, next) => {
     res.json({ success: true, user: r.rows[0] });
   } catch (err) { next(err); }
 };
+
+// GET /api/v1/auth/users/search?q=&limit=
+exports.searchUsers = async (req, res, next) => {
+  try {
+    const { q = '', limit = 50 } = req.query;
+    const trimmed = String(q).trim();
+    const lim = Math.min(parseInt(limit) || 50, 100);
+    let r;
+    if (!trimmed) {
+      r = await pool.query(`
+        SELECT u.id, u.name, u.email, u.avatar_url, u.location, u.total_rides, u.bio,
+               v.name AS bike_name, v.brand AS bike_brand, v.model AS bike_model
+        FROM users u
+        LEFT JOIN vehicles v ON v.user_id = u.id AND v.is_primary = TRUE
+        WHERE u.id != $1 AND u.is_active = TRUE
+        ORDER BY u.total_rides DESC, u.name ASC LIMIT $2
+      `, [req.user.id, lim]);
+    } else {
+      const pat = `%${trimmed}%`;
+      r = await pool.query(`
+        SELECT u.id, u.name, u.email, u.avatar_url, u.location, u.total_rides, u.bio,
+               v.name AS bike_name, v.brand AS bike_brand, v.model AS bike_model
+        FROM users u
+        LEFT JOIN vehicles v ON v.user_id = u.id AND v.is_primary = TRUE
+        WHERE (u.name ILIKE $1 OR u.email ILIKE $1)
+          AND u.id != $2 AND u.is_active = TRUE
+        ORDER BY u.total_rides DESC, u.name ASC LIMIT $3
+      `, [pat, req.user.id, lim]);
+    }
+    res.json({ success: true, users: r.rows });
+  } catch (err) { next(err); }
+};
