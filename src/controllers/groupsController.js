@@ -87,7 +87,8 @@ exports.getGroupById = async (req, res, next) => {
     if (!gRes.rows.length)
       return res.status(404).json({ success: false, message: 'Group not found' });
 
-    const [membersRes, rulesRes, messagesRes, joinReqRes] = await Promise.all([
+    // Run members, rules, messages in parallel — these tables always exist
+    const [membersRes, rulesRes, messagesRes] = await Promise.all([
       pool.query(`
         SELECT gm.role, gm.joined_at,
                u.id, u.name, u.avatar_url, u.location, u.total_rides
@@ -104,15 +105,26 @@ exports.getGroupById = async (req, res, next) => {
         WHERE gm.group_id = $1
         ORDER BY gm.sent_at ASC LIMIT 100
       `, [id]),
-      userId ? pool.query(
-        `SELECT status FROM group_join_requests WHERE group_id=$1 AND user_id=$2`,
-        [id, userId]
-      ) : { rows: [] },
     ]);
+
+    // FIX: group_join_requests is a new table — query it separately so a missing
+    // table doesn't crash the entire getGroupById and cause "Could not load group".
+    let myJoinReq = null;
+    if (userId) {
+      try {
+        const joinReqRes = await pool.query(
+          `SELECT status FROM group_join_requests WHERE group_id=$1 AND user_id=$2`,
+          [id, userId]
+        );
+        myJoinReq = joinReqRes.rows[0] || null;
+      } catch {
+        // Table may not exist yet on older deployments — safe to ignore
+        myJoinReq = null;
+      }
+    }
 
     const isMember = membersRes.rows.some(m => m.id === userId);
     const isAdmin  = membersRes.rows.some(m => m.id === userId && m.role === 'admin');
-    const myJoinReq = joinReqRes.rows[0] || null;
 
     res.json({
       success: true,
@@ -327,7 +339,10 @@ exports.getJoinRequests = async (req, res, next) => {
     if (!adminCheck.rows.length)
       return res.status(403).json({ success: false, message: 'Admin only' });
 
-    const r = await pool.query(`
+    // FIX: handle case where group_join_requests table doesn't exist yet
+    let rows = [];
+    try {
+      const r = await pool.query(`
       SELECT gjr.id, gjr.status, gjr.message, gjr.created_at,
              u.id AS user_id, u.name, u.avatar_url, u.location, u.total_rides,
              v.name AS bike_name, v.brand AS bike_brand, v.model AS bike_model
@@ -337,7 +352,12 @@ exports.getJoinRequests = async (req, res, next) => {
       WHERE gjr.group_id = $1 AND gjr.status = 'pending'
       ORDER BY gjr.created_at ASC
     `, [id]);
-    res.json({ success: true, requests: r.rows });
+      rows = r.rows;
+    } catch {
+      // group_join_requests table doesn't exist yet — return empty
+      rows = [];
+    }
+    res.json({ success: true, requests: rows });
   } catch (err) { next(err); }
 };
 
