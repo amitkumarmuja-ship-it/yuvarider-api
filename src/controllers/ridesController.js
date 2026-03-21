@@ -1,15 +1,22 @@
 const pool = require('../config/db');
 
 /**
- * isUploadedFilename — returns true if the value looks like a real uploaded
- * file (e.g. "550e8400-e29b-41d4-a716-446655440000.jpg") rather than a preset
- * display name (e.g. "Beach Drive", "Mountain Pass").
- * Only real filenames should be stored in cover_photo / cover_photo_name.
+ * isUploadedFilename — true for real server-uploaded files like "uuid.jpg".
+ * Used to decide whether a value can be used to build a /uploads/<file> URL.
+ * Preset display names like "Mountain Pass" or "Beach Drive" return false.
  */
 function isUploadedFilename(val) {
   if (!val || typeof val !== 'string') return false;
-  // Must contain a dot (file extension) and not contain spaces
   return val.includes('.') && !val.includes(' ');
+}
+
+/**
+ * sanitizeCoverPhotoName — returns any non-empty string as-is.
+ * cover_photo_name stores whatever the user chose: uploaded filename OR preset name.
+ * It is the human-readable / display identifier. Always save it if provided.
+ */
+function sanitizeCoverPhotoName(val) {
+  return (val && typeof val === 'string' && val.trim()) ? val.trim() : null;
 }
 require('dotenv').config();
 
@@ -309,11 +316,11 @@ exports.createRide = async (req, res, next) => {
       req.user.id, name, description || null, source, destination,
       start_date, start_time, end_date || null, end_time || null,
       distance_km || null, duration_hrs || null,
-      // FIX: Only store real uploaded filenames (uuid.jpg), not preset display names.
-      // RideDetailScreen reads cover_photo to build the display URL.
-      // Frontend sends cover_photo_name from upload; we sync both fields.
+      // cover_photo      = real uploaded filename only (uuid.jpg) — used to build /uploads/ URL.
+      // cover_photo_name = any name the user chose: uploaded uuid.jpg OR preset like "Mountain Pass".
+      //                    This is what the frontend reads back to pre-fill the cover photo picker.
       (isUploadedFilename(cover_photo) ? cover_photo : isUploadedFilename(cover_photo_name) ? cover_photo_name : null),
-      (isUploadedFilename(cover_photo_name) ? cover_photo_name : isUploadedFilename(cover_photo) ? cover_photo : null),
+      sanitizeCoverPhotoName(cover_photo_name) || sanitizeCoverPhotoName(cover_photo) || null,
       ride_type || 'Public', is_paid || false, entry_fee || 0, max_participants || 20,
       tags || [], scenic || false,
       lead_rider_id || null, marshal_id || null, sweep_id || null, group_id || null,
@@ -388,14 +395,18 @@ exports.updateRide = async (req, res, next) => {
 
     await client.query('BEGIN');
 
-    // Resolve the cover photo filename: prefer cover_photo_name (what frontend sends after upload),
-    // fall back to cover_photo if provided, otherwise leave existing DB value unchanged.
-    // Only accept real uploaded filenames (uuid.jpg pattern, not preset names like 'Beach Drive').
-    const resolvedCoverPhoto = isUploadedFilename(cover_photo_name)
-      ? cover_photo_name
-      : isUploadedFilename(cover_photo)
-        ? cover_photo
-        : undefined; // undefined = keep existing DB value via COALESCE
+    // cover_photo      = real uploaded uuid.jpg only  — used to build /uploads/<file> URL.
+    //                    Set only when the value looks like an uploaded file.
+    // cover_photo_name = any display name the user chose: uuid.jpg OR a preset like "Mountain Pass".
+    //                    Always saved if provided so the picker is pre-filled on next edit.
+    // Both use COALESCE($N, column) so omitting them (undefined→null) keeps the existing DB value.
+    const newCoverPhoto = isUploadedFilename(cover_photo_name) ? cover_photo_name
+                        : isUploadedFilename(cover_photo)      ? cover_photo
+                        : undefined;                           // keep existing
+
+    const newCoverPhotoName = sanitizeCoverPhotoName(cover_photo_name)
+                           || sanitizeCoverPhotoName(cover_photo)
+                           || undefined;                       // keep existing
 
     const r = await client.query(`
       UPDATE rides SET
@@ -405,17 +416,18 @@ exports.updateRide = async (req, res, next) => {
         end_date=COALESCE($7,end_date), end_time=COALESCE($8,end_time),
         distance_km=COALESCE($9,distance_km), duration_hrs=COALESCE($10,duration_hrs),
         cover_photo=COALESCE($11,cover_photo),
-        cover_photo_name=COALESCE($11,cover_photo_name),
-        ride_type=COALESCE($12,ride_type), is_paid=COALESCE($13,is_paid),
-        entry_fee=COALESCE($14,entry_fee), max_participants=COALESCE($15,max_participants),
-        tags=COALESCE($16,tags), scenic=COALESCE($17,scenic), status=COALESCE($18,status),
-        lead_rider_id=COALESCE($19,lead_rider_id),
-        marshal_id=COALESCE($20,marshal_id), sweep_id=COALESCE($21,sweep_id),
+        cover_photo_name=COALESCE($12,cover_photo_name),
+        ride_type=COALESCE($13,ride_type), is_paid=COALESCE($14,is_paid),
+        entry_fee=COALESCE($15,entry_fee), max_participants=COALESCE($16,max_participants),
+        tags=COALESCE($17,tags), scenic=COALESCE($18,scenic), status=COALESCE($19,status),
+        lead_rider_id=COALESCE($20,lead_rider_id),
+        marshal_id=COALESCE($21,marshal_id), sweep_id=COALESCE($22,sweep_id),
         updated_at=NOW()
-      WHERE id=$22 RETURNING *
+      WHERE id=$23 RETURNING *
     `, [name, description, source, destination, start_date, start_time, end_date, end_time,
         distance_km, duration_hrs,
-        resolvedCoverPhoto || null,
+        newCoverPhoto     || null,
+        newCoverPhotoName || null,
         ride_type, is_paid, entry_fee,
         max_participants, tags, scenic, status,
         lead_rider_id, marshal_id, sweep_id, id]);
