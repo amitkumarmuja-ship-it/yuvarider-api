@@ -388,6 +388,15 @@ exports.updateRide = async (req, res, next) => {
 
     await client.query('BEGIN');
 
+    // Resolve the cover photo filename: prefer cover_photo_name (what frontend sends after upload),
+    // fall back to cover_photo if provided, otherwise leave existing DB value unchanged.
+    // Only accept real uploaded filenames (uuid.jpg pattern, not preset names like 'Beach Drive').
+    const resolvedCoverPhoto = isUploadedFilename(cover_photo_name)
+      ? cover_photo_name
+      : isUploadedFilename(cover_photo)
+        ? cover_photo
+        : undefined; // undefined = keep existing DB value via COALESCE
+
     const r = await client.query(`
       UPDATE rides SET
         name=COALESCE($1,name), description=COALESCE($2,description),
@@ -395,20 +404,21 @@ exports.updateRide = async (req, res, next) => {
         start_date=COALESCE($5,start_date), start_time=COALESCE($6,start_time),
         end_date=COALESCE($7,end_date), end_time=COALESCE($8,end_time),
         distance_km=COALESCE($9,distance_km), duration_hrs=COALESCE($10,duration_hrs),
-        cover_photo=COALESCE($11,COALESCE($12,cover_photo)), cover_photo_name=COALESCE($12,COALESCE($11,cover_photo_name)),
-        ride_type=COALESCE($13,ride_type), is_paid=COALESCE($14,is_paid),
-        entry_fee=COALESCE($15,entry_fee), max_participants=COALESCE($16,max_participants),
-        tags=COALESCE($17,tags), scenic=COALESCE($18,scenic), status=COALESCE($19,status),
-        lead_rider_id=COALESCE($20,lead_rider_id),
-        marshal_id=COALESCE($21,marshal_id), sweep_id=COALESCE($22,sweep_id),
+        cover_photo=COALESCE($11,cover_photo),
+        cover_photo_name=COALESCE($11,cover_photo_name),
+        ride_type=COALESCE($12,ride_type), is_paid=COALESCE($13,is_paid),
+        entry_fee=COALESCE($14,entry_fee), max_participants=COALESCE($15,max_participants),
+        tags=COALESCE($16,tags), scenic=COALESCE($17,scenic), status=COALESCE($18,status),
+        lead_rider_id=COALESCE($19,lead_rider_id),
+        marshal_id=COALESCE($20,marshal_id), sweep_id=COALESCE($21,sweep_id),
         updated_at=NOW()
-      WHERE id=$23 RETURNING *
-    `, [name,description,source,destination,start_date,start_time,end_date,end_time,
+      WHERE id=$22 RETURNING *
+    `, [name, description, source, destination, start_date, start_time, end_date, end_time,
         distance_km, duration_hrs,
-        isUploadedFilename(cover_photo)      ? cover_photo      : null,
-        isUploadedFilename(cover_photo_name) ? cover_photo_name : null,
+        resolvedCoverPhoto || null,
         ride_type, is_paid, entry_fee,
-        max_participants,tags,scenic,status,lead_rider_id,marshal_id,sweep_id,id]);
+        max_participants, tags, scenic, status,
+        lead_rider_id, marshal_id, sweep_id, id]);
 
     // FIX: Upsert role participants when roles change
     const roleUpdates = [
