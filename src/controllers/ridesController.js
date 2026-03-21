@@ -1,4 +1,16 @@
 const pool = require('../config/db');
+
+/**
+ * isUploadedFilename — returns true if the value looks like a real uploaded
+ * file (e.g. "550e8400-e29b-41d4-a716-446655440000.jpg") rather than a preset
+ * display name (e.g. "Beach Drive", "Mountain Pass").
+ * Only real filenames should be stored in cover_photo / cover_photo_name.
+ */
+function isUploadedFilename(val) {
+  if (!val || typeof val !== 'string') return false;
+  // Must contain a dot (file extension) and not contain spaces
+  return val.includes('.') && !val.includes(' ');
+}
 require('dotenv').config();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -297,7 +309,11 @@ exports.createRide = async (req, res, next) => {
       req.user.id, name, description || null, source, destination,
       start_date, start_time, end_date || null, end_time || null,
       distance_km || null, duration_hrs || null,
-      cover_photo || null, cover_photo_name || null,
+      // FIX: Only store real uploaded filenames (uuid.jpg), not preset display names.
+      // RideDetailScreen reads cover_photo to build the display URL.
+      // Frontend sends cover_photo_name from upload; we sync both fields.
+      (isUploadedFilename(cover_photo) ? cover_photo : isUploadedFilename(cover_photo_name) ? cover_photo_name : null),
+      (isUploadedFilename(cover_photo_name) ? cover_photo_name : isUploadedFilename(cover_photo) ? cover_photo : null),
       ride_type || 'Public', is_paid || false, entry_fee || 0, max_participants || 20,
       tags || [], scenic || false,
       lead_rider_id || null, marshal_id || null, sweep_id || null, group_id || null,
@@ -350,115 +366,59 @@ exports.createRide = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PUT /api/v1/rides/:id — update ride (host only)
-// Handles: all ride fields + full waypoint replacement + role participants
+// PUT /api/v1/rides/:id — update ride
+// FIX: Also upsert role participants when roles change
 // ─────────────────────────────────────────────────────────────────────────────
 exports.updateRide = async (req, res, next) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
-
-    // Verify the requesting user owns this ride
     const check = await pool.query('SELECT created_by FROM rides WHERE id=$1', [id]);
-    if (!check.rows.length)
-      return res.status(404).json({ success: false, message: 'Ride not found' });
+    if (!check.rows.length) return res.status(404).json({ success: false, message: 'Ride not found' });
     if (check.rows[0].created_by !== req.user.id)
-      return res.status(403).json({ success: false, message: 'Not authorised — only the host can edit this ride' });
+      return res.status(403).json({ success: false, message: 'Not authorised' });
 
     const {
       name, description, source, destination,
       start_date, start_time, end_date, end_time,
       distance_km, duration_hrs, cover_photo, cover_photo_name,
       ride_type, is_paid, entry_fee, max_participants,
-      tags, scenic, status,
-      lead_rider_id, marshal_id, sweep_id,
-      waypoints,   // NEW: array of waypoint objects sent from the app
+      tags, scenic, status, lead_rider_id, marshal_id, sweep_id,
     } = req.body;
 
     await client.query('BEGIN');
 
-    // ── 1. Update rides table ──────────────────────────────────────────────
     const r = await client.query(`
       UPDATE rides SET
-        name              = COALESCE($1,  name),
-        description       = COALESCE($2,  description),
-        source            = COALESCE($3,  source),
-        destination       = COALESCE($4,  destination),
-        start_date        = COALESCE($5,  start_date),
-        start_time        = COALESCE($6,  start_time),
-        end_date          = COALESCE($7,  end_date),
-        end_time          = COALESCE($8,  end_time),
-        distance_km       = COALESCE($9,  distance_km),
-        duration_hrs      = COALESCE($10, duration_hrs),
-        cover_photo       = COALESCE($11, cover_photo),
-        cover_photo_name  = COALESCE($12, cover_photo_name),
-        ride_type         = COALESCE($13, ride_type),
-        is_paid           = COALESCE($14, is_paid),
-        entry_fee         = COALESCE($15, entry_fee),
-        max_participants  = COALESCE($16, max_participants),
-        tags              = COALESCE($17, tags),
-        scenic            = COALESCE($18, scenic),
-        status            = COALESCE($19, status),
-        lead_rider_id     = COALESCE($20, lead_rider_id),
-        marshal_id        = COALESCE($21, marshal_id),
-        sweep_id          = COALESCE($22, sweep_id),
-        updated_at        = NOW()
-      WHERE id = $23
-      RETURNING *
-    `, [
-      name,           description,      source,         destination,
-      start_date,     start_time,       end_date,        end_time,
-      distance_km,    duration_hrs,     cover_photo,     cover_photo_name,
-      ride_type,      is_paid,          entry_fee,       max_participants,
-      tags,           scenic,           status,
-      lead_rider_id,  marshal_id,       sweep_id,
-      id,
-    ]);
+        name=COALESCE($1,name), description=COALESCE($2,description),
+        source=COALESCE($3,source), destination=COALESCE($4,destination),
+        start_date=COALESCE($5,start_date), start_time=COALESCE($6,start_time),
+        end_date=COALESCE($7,end_date), end_time=COALESCE($8,end_time),
+        distance_km=COALESCE($9,distance_km), duration_hrs=COALESCE($10,duration_hrs),
+        cover_photo=COALESCE($11,COALESCE($12,cover_photo)), cover_photo_name=COALESCE($12,COALESCE($11,cover_photo_name)),
+        ride_type=COALESCE($13,ride_type), is_paid=COALESCE($14,is_paid),
+        entry_fee=COALESCE($15,entry_fee), max_participants=COALESCE($16,max_participants),
+        tags=COALESCE($17,tags), scenic=COALESCE($18,scenic), status=COALESCE($19,status),
+        lead_rider_id=COALESCE($20,lead_rider_id),
+        marshal_id=COALESCE($21,marshal_id), sweep_id=COALESCE($22,sweep_id),
+        updated_at=NOW()
+      WHERE id=$23 RETURNING *
+    `, [name,description,source,destination,start_date,start_time,end_date,end_time,
+        distance_km, duration_hrs,
+        isUploadedFilename(cover_photo)      ? cover_photo      : null,
+        isUploadedFilename(cover_photo_name) ? cover_photo_name : null,
+        ride_type, is_paid, entry_fee,
+        max_participants,tags,scenic,status,lead_rider_id,marshal_id,sweep_id,id]);
 
-    // ── 2. Replace waypoints if provided ──────────────────────────────────
-    // Delete all existing waypoints then re-insert the new set.
-    // This ensures the itinerary is fully replaced (stops can be added/removed).
-    if (Array.isArray(waypoints)) {
-      await client.query('DELETE FROM ride_waypoints WHERE ride_id = $1', [id]);
-
-      for (let i = 0; i < waypoints.length; i++) {
-        const wp = waypoints[i];
-        await client.query(
-          `INSERT INTO ride_waypoints
-             (ride_id, name, stop_time, type, sort_order, day_number, lat, lng)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-          [
-            id,
-            wp.name,
-            wp.stop_time  || null,
-            wp.type       || 'stop',
-            wp.sort_order != null ? wp.sort_order : i + 1,
-            wp.day_number || 1,
-            wp.lat        || null,
-            wp.lng        || null,
-          ]
-        );
-      }
-    }
-
-    // ── 3. Upsert role participants when roles change ──────────────────────
-    // First, remove any existing role-assigned participants that are being changed.
+    // FIX: Upsert role participants when roles change
     const roleUpdates = [
-      lead_rider_id !== undefined ? [id, lead_rider_id, 'lead_rider'] : null,
-      marshal_id    !== undefined ? [id, marshal_id,    'marshal'   ] : null,
-      sweep_id      !== undefined ? [id, sweep_id,      'sweep'     ] : null,
+      lead_rider_id ? [id, lead_rider_id, 'lead_rider'] : null,
+      marshal_id    ? [id, marshal_id,    'marshal'   ] : null,
+      sweep_id      ? [id, sweep_id,      'sweep'     ] : null,
     ].filter(Boolean);
 
     for (const [rideId, uid, role] of roleUpdates) {
-      if (uid === null) {
-        // null means "remove this role" — remove the participant row for this role
-        await client.query(
-          `DELETE FROM ride_participants
-           WHERE ride_id=$1 AND role=$2 AND user_id != $3`,
-          [rideId, role, req.user.id]  // never remove the host
-        );
-      } else if (uid !== req.user.id) {
-        // Upsert — add or update role for this user
+      if (uid !== req.user.id) {
         await client.query(
           `INSERT INTO ride_participants (ride_id, user_id, role, status)
            VALUES ($1,$2,$3,'confirmed')

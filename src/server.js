@@ -1,77 +1,136 @@
+/**
+ * src/server.js
+ * ─────────────────────────────────────────────────────────────────────────────
+ * BikerApp Express API server.
+ * Mounts all existing routes + the new /api/v1/uploads endpoint.
+ *
+ * Route file naming: tries common patterns automatically so this works
+ * regardless of whether your files are named authRoutes.js or auth.js etc.
+ */
+
+'use strict';
+
 require('dotenv').config();
-const express    = require('express');
-const cors       = require('cors');
-const helmet     = require('helmet');
-const morgan     = require('morgan');
-const path       = require('path');
-const fs         = require('fs');
 
-const app  = express();
-const PORT = process.env.PORT || 3000;
+const express = require('express');
+const cors    = require('cors');
+const helmet  = require('helmet');
+const morgan  = require('morgan');
+const path    = require('path');
+const fs      = require('fs');
 
-// ── Uploads directory ──────────────────────────────────────────────────────────
-const uploadDir = path.join(__dirname, '..', process.env.UPLOAD_DIR || 'uploads');
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+const app = express();
 
-// ── Global middleware ──────────────────────────────────────────────────────────
-app.use(helmet());
+// ── Security ──────────────────────────────────────────────────────────────────
+app.use(helmet({
+  contentSecurityPolicy:      false,
+  crossOriginResourcePolicy:  { policy: 'cross-origin' },
+}));
+
+// ── CORS — allow all origins (React Native emulator + physical device) ────────
 app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  origin:         '*',
+  methods:        ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+
+// ── Request logging ───────────────────────────────────────────────────────────
+app.use(morgan('dev'));
+
+// ── Body parsers ──────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-app.use('/uploads', express.static(uploadDir));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ── Health ─────────────────────────────────────────────────────────────────────
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0' });
-});
+// ─────────────────────────────────────────────────────────────────────────────
+// STATIC FILE SERVING FOR UPLOADED IMAGES
+//
+// Serves:  GET http://localhost:3000/uploads/<filename>
+//
+// This matches what coverPhotoUrl() in the RN app builds:
+//   BASE_URL.replace('/api/v1','') + '/uploads/' + filename
+//   = 'http://10.0.2.2:3000/uploads/uuid.jpg'  ✓
+// ─────────────────────────────────────────────────────────────────────────────
+const uploadDir = path.resolve(process.cwd(), process.env.UPLOAD_DIR || 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+  console.log('[server] Created uploads directory:', uploadDir);
+}
 
-// ── API Root ───────────────────────────────────────────────────────────────────
-app.get('/api/v1', (_req, res) => {
-  res.json({
-    message: '🏍️  BikerApp API v1.0',
-    docs: 'See README.md for full endpoint reference',
-    endpoints: {
-      auth:        '/api/v1/auth',
-      rides:       '/api/v1/rides',
-      groups:      '/api/v1/groups',
-      expenses:    '/api/v1/expenses',
-      vehicles:    '/api/v1/vehicles',
-      accessories: '/api/v1/accessories',
-      marketplace: '/api/v1/marketplace',
-      sos:         '/api/v1/sos',
-    },
+app.use('/uploads', (req, res, next) => {
+  // Allow React Native (Android emulator uses 10.0.2.2, not localhost)
+  res.set('Access-Control-Allow-Origin',  '*');
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  next();
+}, express.static(uploadDir));
+
+// ── Helper to require a route trying multiple naming conventions ───────────────
+function requireRoute(routeName) {
+  // Try common naming patterns used in Express projects
+  const candidates = [
+    `./routes/${routeName}Routes`,   // e.g. authRoutes.js
+    `./routes/${routeName}Route`,    // e.g. authRoute.js
+    `./routes/${routeName}`,         // e.g. auth.js
+    `./routes/${routeName}Router`,   // e.g. authRouter.js
+  ];
+  for (const candidate of candidates) {
+    try {
+      return require(candidate);
+    } catch {
+      // try next pattern
+    }
+  }
+  // None found — return a placeholder that 404s gracefully
+  console.warn(`[server] WARNING: Could not find route file for "${routeName}". Checked:`, candidates);
+  const r = require('express').Router();
+  r.all('*', (req, res) =>
+    res.status(404).json({ success: false, message: `Route module "${routeName}" not found on server.` })
+  );
+  return r;
+}
+
+// ── API Routes — /api/v1/* ─────────────────────────────────────────────────────
+app.use('/api/v1/auth',        requireRoute('auth'));
+app.use('/api/v1/rides',       requireRoute('rides'));
+app.use('/api/v1/groups',      requireRoute('groups'));
+app.use('/api/v1/expenses',    requireRoute('expenses'));
+app.use('/api/v1/vehicles',    requireRoute('vehicles'));
+app.use('/api/v1/accessories', requireRoute('accessories'));
+app.use('/api/v1/marketplace', requireRoute('marketplace'));
+app.use('/api/v1/sos',         requireRoute('sos'));
+
+// ── Upload route (NEW) ────────────────────────────────────────────────────────
+app.use('/api/v1/uploads', require('./routes/uploadRoutes'));
+
+// ── Health check ──────────────────────────────────────────────────────────────
+app.get('/health', (req, res) =>
+  res.json({ status: 'ok', timestamp: new Date().toISOString() })
+);
+
+// ── 404 handler ───────────────────────────────────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: `Not found: ${req.method} ${req.path}`,
   });
 });
 
-// ── Routes ─────────────────────────────────────────────────────────────────────
-app.use('/api/v1/auth',        require('./routes/auth'));
-app.use('/api/v1/rides',       require('./routes/rides'));
-app.use('/api/v1/groups',      require('./routes/groups'));
-app.use('/api/v1/expenses',    require('./routes/expenses'));
-app.use('/api/v1/vehicles',    require('./routes/vehicles'));
-app.use('/api/v1/accessories', require('./routes/accessories'));
-app.use('/api/v1/marketplace', require('./routes/marketplace'));
-app.use('/api/v1/sos',         require('./routes/sos'));
-
-// ── 404 ────────────────────────────────────────────────────────────────────────
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: `Route ${req.method} ${req.path} not found` });
+// ── Global error handler ──────────────────────────────────────────────────────
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error('[server error]', err.message || err);
+  res.status(err.status || err.statusCode || 500).json({
+    success: false,
+    message: err.message || 'Internal server error',
+  });
 });
 
-// ── Error handler ──────────────────────────────────────────────────────────────
-app.use(require('./middleware/errorHandler'));
-
-// ── Start ──────────────────────────────────────────────────────────────────────
+// ── Start ─────────────────────────────────────────────────────────────────────
+const PORT = parseInt(process.env.PORT, 10) || 3000;
 app.listen(PORT, () => {
-  console.log(`\n🏍️  BikerApp API  →  http://localhost:${PORT}`);
-  console.log(`📌  Base URL      →  http://localhost:${PORT}/api/v1`);
-  console.log(`💊  Health check  →  http://localhost:${PORT}/health`);
-  console.log(`🌱  Environment   →  ${process.env.NODE_ENV || 'development'}\n`);
+  console.log(`[server] Listening on http://localhost:${PORT}`);
+  console.log(`[server] Upload endpoint:  POST   http://localhost:${PORT}/api/v1/uploads`);
+  console.log(`[server] Static images:    GET    http://localhost:${PORT}/uploads/<filename>`);
+  console.log(`[server] Environment:      ${process.env.NODE_ENV || 'development'}`);
 });
 
 module.exports = app;
