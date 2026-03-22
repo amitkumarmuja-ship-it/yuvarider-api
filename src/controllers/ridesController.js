@@ -14,6 +14,15 @@ function isUploadedFilename(val) {
 }
 
 /**
+ * isCloudinaryUrl — true only for full https:// Cloudinary URLs.
+ * Used to distinguish persistent Cloudinary URLs from stale local filenames.
+ */
+function isCloudinaryUrl(val) {
+  if (!val || typeof val !== 'string') return false;
+  return val.startsWith('http://') || val.startsWith('https://');
+}
+
+/**
  * sanitizeCoverPhotoName — returns any non-empty string as-is.
  * cover_photo_name stores whatever the user chose: uploaded filename OR preset name.
  * It is the human-readable / display identifier. Always save it if provided.
@@ -319,10 +328,12 @@ exports.createRide = async (req, res, next) => {
       req.user.id, name, description || null, source, destination,
       start_date, start_time, end_date || null, end_time || null,
       distance_km || null, duration_hrs || null,
-      // cover_photo      = real uploaded filename only (uuid.jpg) — used to build /uploads/ URL.
-      // cover_photo_name = any name the user chose: uploaded uuid.jpg OR preset like "Mountain Pass".
-      //                    This is what the frontend reads back to pre-fill the cover photo picker.
-      (isUploadedFilename(cover_photo) ? cover_photo : isUploadedFilename(cover_photo_name) ? cover_photo_name : null),
+      // cover_photo      = Cloudinary URL (prod) or uuid.jpg (dev). Null for preset names.
+      // cover_photo_name = any value: Cloudinary URL, uuid.jpg, or preset name like "Mountain Pass".
+      (isCloudinaryUrl(cover_photo_name)  ? cover_photo_name :
+       isCloudinaryUrl(cover_photo)       ? cover_photo :
+       isUploadedFilename(cover_photo_name) ? cover_photo_name :
+       isUploadedFilename(cover_photo)      ? cover_photo : null),
       sanitizeCoverPhotoName(cover_photo_name) || sanitizeCoverPhotoName(cover_photo) || null,
       ride_type || 'Public', is_paid || false, entry_fee || 0, max_participants || 20,
       tags || [], scenic || false,
@@ -398,18 +409,59 @@ exports.updateRide = async (req, res, next) => {
 
     await client.query('BEGIN');
 
-    // cover_photo      = real uploaded uuid.jpg only  — used to build /uploads/<file> URL.
-    //                    Set only when the value looks like an uploaded file.
-    // cover_photo_name = any display name the user chose: uuid.jpg OR a preset like "Mountain Pass".
-    //                    Always saved if provided so the picker is pre-filled on next edit.
-    // Both use COALESCE($N, column) so omitting them (undefined→null) keeps the existing DB value.
-    const newCoverPhoto = isUploadedFilename(cover_photo_name) ? cover_photo_name
-                        : isUploadedFilename(cover_photo)      ? cover_photo
-                        : undefined;                           // keep existing
+    // ── Cover photo resolution ──────────────────────────────────────────────
+    // cover_photo      = persistent image reference (Cloudinary URL or local uuid.jpg in dev).
+    //                    Used by the frontend to build display URLs.
+    // cover_photo_name = any display name: Cloudinary URL, uuid.jpg, or preset like "Mountain Pass".
+    //                    Pre-fills the picker on next edit.
+    //
+    // Key rule: if the user explicitly sends cover_photo_name (even a preset name),
+    // we treat it as a deliberate cover photo change and update cover_photo accordingly:
+    //   - Cloudinary URL → save as cover_photo (persistent, will display correctly)
+    //   - Local uuid.jpg → save as cover_photo (dev only)
+    //   - Preset name → set cover_photo to NULL (presets use local app assets, not server files)
+    //     This clears any stale local UUID that was in cover_photo from a previous local upload.
+    //
+    // If cover_photo_name is NOT sent at all (undefined), both columns keep their existing values.
 
-    const newCoverPhotoName = sanitizeCoverPhotoName(cover_photo_name)
-                           || sanitizeCoverPhotoName(cover_photo)
-                           || undefined;                       // keep existing
+    let newCoverPhoto;
+    let newCoverPhotoName;
+
+    if (cover_photo_name !== undefined || cover_photo !== undefined) {
+      // User explicitly sent a cover photo value — process it
+      const nameVal = cover_photo_name || cover_photo || '';
+
+      if (isCloudinaryUrl(nameVal)) {
+        // Full Cloudinary URL (production) — store in both columns
+        newCoverPhoto     = nameVal;
+        newCoverPhotoName = nameVal;
+      } else if (isUploadedFilename(nameVal)) {
+        // Local UUID filename (dev fallback) — store in both columns
+        newCoverPhoto     = nameVal;
+        newCoverPhotoName = nameVal;
+      } else if (sanitizeCoverPhotoName(nameVal)) {
+        // Preset name like "Mountain Pass" — store name but CLEAR cover_photo
+        // so stale local UUIDs don't cause 404s (preset images live in the app bundle)
+        newCoverPhoto     = null;           // explicitly NULL — clears any stale local filename
+        newCoverPhotoName = nameVal.trim();
+      } else {
+        // Empty / blank — keep existing values
+        newCoverPhoto     = undefined;
+        newCoverPhotoName = undefined;
+      }
+    } else {
+      // Not sent at all — keep existing DB values via COALESCE
+      newCoverPhoto     = undefined;
+      newCoverPhotoName = undefined;
+    }
+
+    // For cover columns: use CASE to handle three states:
+    //   newCoverPhoto/newCoverPhotoName = undefined  → keep existing (no change)
+    //   newCoverPhoto/newCoverPhotoName = null        → explicitly set to NULL (clear stale)
+    //   newCoverPhoto/newCoverPhotoName = string      → set to that value
+    const KEEP = '__KEEP__';  // sentinel: don't change this column
+    const coverPhotoParam     = newCoverPhoto     === undefined ? KEEP : newCoverPhoto;
+    const coverPhotoNameParam = newCoverPhotoName === undefined ? KEEP : newCoverPhotoName;
 
     const r = await client.query(`
       UPDATE rides SET
@@ -418,8 +470,8 @@ exports.updateRide = async (req, res, next) => {
         start_date=COALESCE($5,start_date), start_time=COALESCE($6,start_time),
         end_date=COALESCE($7,end_date), end_time=COALESCE($8,end_time),
         distance_km=COALESCE($9,distance_km), duration_hrs=COALESCE($10,duration_hrs),
-        cover_photo=COALESCE($11,cover_photo),
-        cover_photo_name=COALESCE($12,cover_photo_name),
+        cover_photo      = CASE WHEN $11 = '__KEEP__' THEN cover_photo      ELSE $11::TEXT END,
+        cover_photo_name = CASE WHEN $12 = '__KEEP__' THEN cover_photo_name ELSE $12::TEXT END,
         ride_type=COALESCE($13,ride_type), is_paid=COALESCE($14,is_paid),
         entry_fee=COALESCE($15,entry_fee), max_participants=COALESCE($16,max_participants),
         tags=COALESCE($17,tags), scenic=COALESCE($18,scenic), status=COALESCE($19,status),
@@ -429,8 +481,8 @@ exports.updateRide = async (req, res, next) => {
       WHERE id=$23 RETURNING *
     `, [name, description, source, destination, start_date, start_time, end_date, end_time,
         distance_km, duration_hrs,
-        newCoverPhoto     || null,
-        newCoverPhotoName || null,
+        coverPhotoParam,
+        coverPhotoNameParam,
         ride_type, is_paid, entry_fee,
         max_participants, tags, scenic, status,
         lead_rider_id, marshal_id, sweep_id, id]);

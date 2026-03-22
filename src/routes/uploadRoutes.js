@@ -87,7 +87,8 @@ async function uploadToCloudinary(buffer, mimeType) {
     const stream   = cloudinary.uploader.upload_stream(
       {
         public_id:       publicId,
-        folder:          'bikerapp',
+        // NOTE: do NOT set folder here — public_id already has 'bikerapp/' prefix.
+        // Setting both causes double-nesting: bikerapp/bikerapp/uuid (bug in logs).
         resource_type:   'image',
         format:          'jpg',        // normalise all uploads to jpg
         transformation:  [
