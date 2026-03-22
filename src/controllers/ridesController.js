@@ -7,6 +7,9 @@ const pool = require('../config/db');
  */
 function isUploadedFilename(val) {
   if (!val || typeof val !== 'string') return false;
+  // Full Cloudinary URL (production): https://res.cloudinary.com/...
+  if (val.startsWith('http://') || val.startsWith('https://')) return true;
+  // Local UUID filename (dev): uuid.jpg — has dot, no spaces
   return val.includes('.') && !val.includes(' ');
 }
 

@@ -12,6 +12,9 @@
 
 require('dotenv').config();
 
+// Initialise Cloudinary early so status is logged at startup
+require('./config/cloudinary');
+
 const express = require('express');
 const cors    = require('cors');
 const helmet  = require('helmet');
