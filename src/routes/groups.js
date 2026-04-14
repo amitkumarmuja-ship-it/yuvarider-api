@@ -22,9 +22,10 @@ router.put   ('/:id',  auth,    ctrl.updateGroup);   // update group (admin)
 router.delete('/:id',  auth,    ctrl.deleteGroup);   // delete group (creator) ← NEW
 
 // ── Membership ────────────────────────────────────────────────────────────────
-router.post  ('/:id/join',           auth, ctrl.joinGroup);       // join public group
-router.post  ('/:id/request-join',   auth, ctrl.requestJoin);     // request private group
-router.delete('/:id/leave',          auth, ctrl.leaveGroup);      // leave group
+router.post  ('/:id/join',                    auth, ctrl.joinGroup);       // join public group
+router.post  ('/:id/request-join',            auth, ctrl.requestJoin);     // request private group
+router.delete('/:id/leave',                   auth, ctrl.leaveGroup);      // leave group
+router.delete('/:id/members/:userId',         auth, ctrl.removeMember);    // remove member (admin only)
 
 // ── Join Requests (admin) ─────────────────────────────────────────────────────
 router.get   ('/:id/join-requests',             auth, ctrl.getJoinRequests);      // list pending

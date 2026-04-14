@@ -664,3 +664,68 @@ exports.deleteRule = async (req, res, next) => {
     res.json({ success: true, message: 'Rule deleted' });
   } catch (err) { next(err); }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/v1/groups/:id/members/:userId  — remove a member (admin only)
+// Admin cannot remove another admin; creator cannot be removed.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.removeMember = async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const { id, userId } = req.params;
+    const requesterId = req.user.id;
+
+    // Requester must be admin
+    const adminCheck = await client.query(
+      `SELECT 1 FROM group_members WHERE group_id=$1 AND user_id=$2 AND role='admin'`,
+      [id, requesterId]
+    );
+    if (!adminCheck.rows.length)
+      return res.status(403).json({ success: false, message: 'Only admins can remove members' });
+
+    // Cannot remove yourself via this endpoint — use leave instead
+    if (userId === requesterId)
+      return res.status(400).json({ success: false, message: 'Use the leave endpoint to remove yourself' });
+
+    // Cannot remove the group creator
+    const grp = await client.query(`SELECT created_by FROM groups WHERE id=$1`, [id]);
+    if (!grp.rows.length)
+      return res.status(404).json({ success: false, message: 'Group not found' });
+    if (grp.rows[0].created_by === userId)
+      return res.status(400).json({ success: false, message: 'Cannot remove the group creator' });
+
+    // Cannot remove another admin (must demote first)
+    const targetRole = await client.query(
+      `SELECT role FROM group_members WHERE group_id=$1 AND user_id=$2`,
+      [id, userId]
+    );
+    if (!targetRole.rows.length)
+      return res.status(404).json({ success: false, message: 'User is not a member of this group' });
+    if (targetRole.rows[0].role === 'admin' && grp.rows[0].created_by !== requesterId)
+      return res.status(400).json({ success: false, message: 'Only the group creator can remove an admin' });
+
+    await client.query('BEGIN');
+    await client.query(
+      `DELETE FROM group_members WHERE group_id=$1 AND user_id=$2`,
+      [id, userId]
+    );
+    await client.query(
+      `UPDATE groups
+         SET member_count = GREATEST((SELECT COUNT(*) FROM group_members WHERE group_id=$1), 0)
+       WHERE id=$1`,
+      [id]
+    );
+    // System message
+    const removedUser = await client.query(`SELECT name FROM users WHERE id=$1`, [userId]);
+    const removedName = removedUser.rows[0]?.name || 'A member';
+    await client.query(
+      `INSERT INTO group_messages (group_id, type, text) VALUES ($1,'system',$2)`,
+      [id, `${removedName} was removed from the group`]
+    );
+    await client.query('COMMIT');
+    res.json({ success: true, message: 'Member removed successfully' });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally { client.release(); }
+};
