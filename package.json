@@ -7,7 +7,8 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "db:migrate": "node src/config/migrate.js",
-    "db:seed": "node src/config/seed.js"
+    "db:seed": "node src/config/seed.js",
+    "db:fix": "node src/config/migrate_schema_fixes.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

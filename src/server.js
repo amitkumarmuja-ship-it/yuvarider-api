@@ -86,6 +86,62 @@ async function runAutoMigrations() {
         AND cover_photo NOT LIKE '% %'
     `);
 
+
+    // 5. Add image_urls column to accessories if missing
+    //    accessoriesController.js reads/writes image_urls in every query and
+    //    uses array_append / array_remove on it — the column must exist.
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'accessories'
+            AND column_name = 'image_urls'
+        ) THEN
+          ALTER TABLE accessories ADD COLUMN image_urls TEXT[] DEFAULT '{}';
+          RAISE NOTICE '[auto-migrate] accessories.image_urls column added';
+        END IF;
+      END $$;
+    `);
+
+    // 6. Expand expenses.category CHECK to include Mechanic, Gear, Custom
+    //    Old constraint: ('Fuel','Food','Maintenance','Toll','Parking','Other')
+    //    New constraint: adds Mechanic, Gear, Custom so the app can save them.
+    //    Uses a named constraint so it can be dropped + re-added idempotently.
+    await client.query(`
+      DO $$ BEGIN
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'expenses_category_check'
+            AND conrelid = 'expenses'::regclass
+        ) THEN
+          -- Drop old constraint only if it lacks Mechanic (i.e. not yet updated)
+          IF (SELECT pg_get_constraintdef(oid) FROM pg_constraint
+              WHERE conname = 'expenses_category_check'
+                AND conrelid = 'expenses'::regclass)
+             NOT LIKE '%Mechanic%'
+          THEN
+            ALTER TABLE expenses DROP CONSTRAINT expenses_category_check;
+            ALTER TABLE expenses
+              ADD CONSTRAINT expenses_category_check
+              CHECK (category IN (
+                'Fuel','Food','Mechanic','Maintenance',
+                'Gear','Toll','Parking','Custom','Other'
+              ));
+            RAISE NOTICE '[auto-migrate] expenses.category CHECK updated';
+          END IF;
+        ELSE
+          -- No named constraint yet — add it fresh
+          ALTER TABLE expenses
+            ADD CONSTRAINT expenses_category_check
+            CHECK (category IN (
+              'Fuel','Food','Mechanic','Maintenance',
+              'Gear','Toll','Parking','Custom','Other'
+            ));
+          RAISE NOTICE '[auto-migrate] expenses.category CHECK added';
+        END IF;
+      END $$;
+    `);
+
     console.log('[auto-migrate] ✓ DB column migrations applied');
   } catch (err) {
     // Non-fatal — log and continue so the server still starts

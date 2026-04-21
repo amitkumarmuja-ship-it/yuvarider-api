@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS expenses (
   vehicle_id     UUID        REFERENCES vehicles(id),
   ride_id        UUID        REFERENCES rides(id),
   category       VARCHAR(30)  NOT NULL
-                 CHECK (category IN ('Fuel','Food','Maintenance','Toll','Parking','Other')),
+                 CHECK (category IN ('Fuel','Food','Mechanic','Maintenance','Gear','Toll','Parking','Custom','Other')),
   amount         NUMERIC(10,2) NOT NULL,
   date           DATE         NOT NULL,
   description    VARCHAR(300),
@@ -219,6 +219,7 @@ CREATE TABLE IF NOT EXISTS accessories (
   emoji          VARCHAR(10)  DEFAULT '🏍',
   bike_name      VARCHAR(200),
   image_url      TEXT,
+  image_urls     TEXT[]       DEFAULT '{}',
   notes          TEXT,
   created_at     TIMESTAMPTZ  DEFAULT NOW(),
   updated_at     TIMESTAMPTZ  DEFAULT NOW()
