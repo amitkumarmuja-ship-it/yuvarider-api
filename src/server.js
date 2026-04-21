@@ -158,6 +158,7 @@ app.use('/api/v1/vehicles',    requireRoute('vehicles'));
 app.use('/api/v1/accessories', requireRoute('accessories'));
 app.use('/api/v1/marketplace', requireRoute('marketplace'));
 app.use('/api/v1/sos',         requireRoute('sos'));
+app.use('/api/v1/master',      require('./routes/master'));   // ← ADD THIS
 
 // ── Upload route ──────────────────────────────────────────────────────────────
 app.use('/api/v1/uploads', require('./routes/uploadRoutes'));
