@@ -1,20 +1,36 @@
 /**
  * src/routes/master.js
  * ─────────────────────────────────────────────────────────────────────────────
- * Master-data routes (accessory categories & brands).
+ * Master-data routes.
  * Mounted at /api/v1/master in server.js.
  *
- * Add in server.js:
- *   app.use('/api/v1/master', require('./routes/master'));
+ * ORIGINAL routes (accessories — unchanged):
+ *   GET /api/v1/master/accessory-categories
+ *   GET /api/v1/master/accessory-brands?category_id=<id>
+ *
+ * NEW routes (marketplace form options):
+ *   GET /api/v1/master/marketplace-options
+ *       All options grouped by group_key — fetched once on screen load.
+ *
+ *   GET /api/v1/master/marketplace-options/:group
+ *       Options for a specific group (e.g. /marketplace-options/fuel_type)
+ *
+ * Auth: all endpoints require a valid JWT (add auth middleware).
+ *       Remove `auth,` to make them public if needed.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 const router = require('express').Router();
 const ctrl   = require('../controllers/masterController');
-const auth   = require('../middleware/auth');   // optional — protect if needed
+const auth   = require('../middleware/auth');
 
-// Both endpoints work without auth so the category/brand lists
-// load on the Add Accessory screen before the user picks anything.
-// Add `auth,` before `ctrl.xxx` if you want them JWT-protected.
+// ── Accessory master data (existing) ──────────────────────────────────────────
 router.get('/accessory-categories', auth, ctrl.getAccessoryCategories);
 router.get('/accessory-brands',     auth, ctrl.getAccessoryBrands);
+
+// ── Marketplace form options (NEW) ────────────────────────────────────────────
+// IMPORTANT: specific route (/marketplace-options) MUST come before
+// the parameterised route (/marketplace-options/:group) in Express.
+router.get('/marketplace-options',        auth, ctrl.getMarketplaceOptions);
+router.get('/marketplace-options/:group', auth, ctrl.getMarketplaceOptionsByGroup);
 
 module.exports = router;

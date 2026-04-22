@@ -1,3 +1,13 @@
+/**
+ * src/controllers/marketplaceController.js
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Full CRUD for marketplace listings.
+ *
+ * CHANGE: updateListing now updates ALL fields (brand, model, fuel_type, etc.)
+ *         not just the original 8 basic fields.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+'use strict';
 const pool = require('../config/db');
 
 // ── GET /api/v1/marketplace ────────────────────────────────────────────────────
@@ -25,7 +35,13 @@ exports.getListings = async (req, res, next) => {
       LIMIT $${params.length - 1} OFFSET $${params.length}
     `, params);
 
-    res.json({ success: true, total: parseInt(countRes.rows[0].count), page: parseInt(page), limit: parseInt(limit), listings: r.rows });
+    res.json({
+      success: true,
+      total: parseInt(countRes.rows[0].count),
+      page: parseInt(page),
+      limit: parseInt(limit),
+      listings: r.rows,
+    });
   } catch (err) { next(err); }
 };
 
@@ -65,7 +81,11 @@ exports.createListing = async (req, res, next) => {
       brand, model, year, km_driven, fuel_type, transmission, owners,
       gear_type, gear_size, gender, certification, part_type, compatible_bikes, image_urls,
     } = req.body;
-    if (!title || !price) return res.status(400).json({ success: false, message: 'title and price are required' });
+
+    if (!title || !price) {
+      return res.status(400).json({ success: false, message: 'title and price are required' });
+    }
+
     const r = await pool.query(`
       INSERT INTO marketplace_listings (
         seller_id, title, description, price, condition, category, location, contact_pref,
@@ -74,29 +94,109 @@ exports.createListing = async (req, res, next) => {
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
       RETURNING *
     `, [
-      req.user.id, title, description||null, price, condition||null, category||null, location||null, contact_pref||'Chat Only',
-      brand||null, model||null, year||null, km_driven||null, fuel_type||null, transmission||null, owners||null,
-      gear_type||null, gear_size||null, gender||null, certification||null, part_type||null, compatible_bikes||null, image_urls||[],
+      req.user.id,
+      title,
+      description   || null,
+      price,
+      condition     || null,
+      category      || null,
+      location      || null,
+      contact_pref  || 'Chat Only',
+      brand         || null,
+      model         || null,
+      year          || null,
+      km_driven     || null,
+      fuel_type     || null,
+      transmission  || null,
+      owners        || null,
+      gear_type     || null,
+      gear_size     || null,
+      gender        || null,
+      certification || null,
+      part_type     || null,
+      compatible_bikes || null,
+      image_urls    || [],
     ]);
+
     res.status(201).json({ success: true, listing: r.rows[0] });
   } catch (err) { next(err); }
 };
 
 // ── PUT /api/v1/marketplace/:id ────────────────────────────────────────────────
+// UPDATED: Now updates ALL fields, not just the original 8.
 exports.updateListing = async (req, res, next) => {
   try {
-    const l = await pool.query('SELECT seller_id FROM marketplace_listings WHERE id=$1', [req.params.id]);
-    if (!l.rows.length) return res.status(404).json({ success: false, message: 'Listing not found' });
-    if (l.rows[0].seller_id !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorised' });
-    const { title, description, price, condition, location, contact_pref, status, image_urls } = req.body;
+    // Ownership check
+    const l = await pool.query(
+      'SELECT seller_id FROM marketplace_listings WHERE id=$1',
+      [req.params.id],
+    );
+    if (!l.rows.length) {
+      return res.status(404).json({ success: false, message: 'Listing not found' });
+    }
+    if (l.rows[0].seller_id !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Not authorised' });
+    }
+
+    const {
+      title, description, price, condition, category, location, contact_pref, status,
+      brand, model, year, km_driven, fuel_type, transmission, owners,
+      gear_type, gear_size, gender, certification, part_type, compatible_bikes, image_urls,
+    } = req.body;
+
     const r = await pool.query(`
       UPDATE marketplace_listings SET
-        title=COALESCE($1,title), description=COALESCE($2,description),
-        price=COALESCE($3,price), condition=COALESCE($4,condition),
-        location=COALESCE($5,location), contact_pref=COALESCE($6,contact_pref),
-        status=COALESCE($7,status), image_urls=COALESCE($8,image_urls), updated_at=NOW()
-      WHERE id=$9 RETURNING *
-    `, [title, description, price, condition, location, contact_pref, status, image_urls, req.params.id]);
+        title            = COALESCE($1,  title),
+        description      = COALESCE($2,  description),
+        price            = COALESCE($3,  price),
+        condition        = COALESCE($4,  condition),
+        category         = COALESCE($5,  category),
+        location         = COALESCE($6,  location),
+        contact_pref     = COALESCE($7,  contact_pref),
+        status           = COALESCE($8,  status),
+        brand            = COALESCE($9,  brand),
+        model            = COALESCE($10, model),
+        year             = COALESCE($11, year),
+        km_driven        = COALESCE($12, km_driven),
+        fuel_type        = COALESCE($13, fuel_type),
+        transmission     = COALESCE($14, transmission),
+        owners           = COALESCE($15, owners),
+        gear_type        = COALESCE($16, gear_type),
+        gear_size        = COALESCE($17, gear_size),
+        gender           = COALESCE($18, gender),
+        certification    = COALESCE($19, certification),
+        part_type        = COALESCE($20, part_type),
+        compatible_bikes = COALESCE($21, compatible_bikes),
+        image_urls       = COALESCE($22, image_urls),
+        updated_at       = NOW()
+      WHERE id = $23
+      RETURNING *
+    `, [
+      title         || null,
+      description   || null,
+      price         || null,
+      condition     || null,
+      category      || null,
+      location      || null,
+      contact_pref  || null,
+      status        || null,
+      brand         || null,
+      model         || null,
+      year          || null,
+      km_driven     || null,
+      fuel_type     || null,
+      transmission  || null,
+      owners        || null,
+      gear_type     || null,
+      gear_size     || null,
+      gender        || null,
+      certification || null,
+      part_type     || null,
+      compatible_bikes || null,
+      image_urls    || null,
+      req.params.id,
+    ]);
+
     res.json({ success: true, listing: r.rows[0] });
   } catch (err) { next(err); }
 };
@@ -106,9 +206,11 @@ exports.deleteListing = async (req, res, next) => {
   try {
     const r = await pool.query(
       `DELETE FROM marketplace_listings WHERE id=$1 AND seller_id=$2 RETURNING id`,
-      [req.params.id, req.user.id]
+      [req.params.id, req.user.id],
     );
-    if (!r.rows.length) return res.status(404).json({ success: false, message: 'Listing not found or not authorised' });
+    if (!r.rows.length) {
+      return res.status(404).json({ success: false, message: 'Listing not found or not authorised' });
+    }
     res.json({ success: true, message: 'Listing deleted' });
   } catch (err) { next(err); }
 };
@@ -117,10 +219,13 @@ exports.deleteListing = async (req, res, next) => {
 exports.markSold = async (req, res, next) => {
   try {
     const r = await pool.query(
-      `UPDATE marketplace_listings SET status='sold', updated_at=NOW() WHERE id=$1 AND seller_id=$2 RETURNING id`,
-      [req.params.id, req.user.id]
+      `UPDATE marketplace_listings SET status='sold', updated_at=NOW()
+       WHERE id=$1 AND seller_id=$2 RETURNING id`,
+      [req.params.id, req.user.id],
     );
-    if (!r.rows.length) return res.status(404).json({ success: false, message: 'Listing not found or not authorised' });
+    if (!r.rows.length) {
+      return res.status(404).json({ success: false, message: 'Listing not found or not authorised' });
+    }
     res.json({ success: true, message: 'Listing marked as sold' });
   } catch (err) { next(err); }
 };
