@@ -142,6 +142,76 @@ async function runAutoMigrations() {
       END $$;
     `);
 
+    // 7. Create marketplace_purchases table if it doesn't exist
+    //    Records every buyer purchase so history is preserved even if a listing is deleted.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS marketplace_purchases (
+        id                SERIAL       PRIMARY KEY,
+        listing_id        UUID         NOT NULL,
+        buyer_id          UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        seller_id         UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        price_at_purchase NUMERIC      NOT NULL,
+        title_at_purchase TEXT         NOT NULL,
+        purchased_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        UNIQUE(listing_id, buyer_id)
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_mp_buyer_id  ON marketplace_purchases(buyer_id);
+      CREATE INDEX IF NOT EXISTS idx_mp_seller_id ON marketplace_purchases(seller_id);
+    `);
+
+    // ── marketplace_purchase_requests table ─────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS marketplace_purchase_requests (
+        id          SERIAL       PRIMARY KEY,
+        listing_id  UUID         NOT NULL REFERENCES marketplace_listings(id) ON DELETE CASCADE,
+        buyer_id    UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        message     TEXT,
+        status      VARCHAR(20)  NOT NULL DEFAULT 'pending'
+                                 CHECK (status IN ('pending','accepted','rejected')),
+        created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        UNIQUE (listing_id, buyer_id)
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_mpr_listing_id ON marketplace_purchase_requests(listing_id);
+      CREATE INDEX IF NOT EXISTS idx_mpr_buyer_id   ON marketplace_purchase_requests(buyer_id);
+      CREATE INDEX IF NOT EXISTS idx_mpr_status     ON marketplace_purchase_requests(status);
+    `);
+
+    // ── marketplace_purchases (accepted sale history) ────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS marketplace_purchases (
+        id                SERIAL       PRIMARY KEY,
+        listing_id        UUID         NOT NULL,
+        buyer_id          UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        seller_id         UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        request_id        INT          REFERENCES marketplace_purchase_requests(id),
+        price_at_purchase NUMERIC      NOT NULL,
+        title_at_purchase TEXT         NOT NULL,
+        purchased_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        UNIQUE(listing_id, buyer_id)
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_mp_buyer_id  ON marketplace_purchases(buyer_id);
+      CREATE INDEX IF NOT EXISTS idx_mp_seller_id ON marketplace_purchases(seller_id);
+    `);
+
+    // ── Add pending_requests column to marketplace_listings if missing ────────
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='marketplace_listings' AND column_name='view_count'
+        ) THEN
+          ALTER TABLE marketplace_listings ADD COLUMN view_count INT DEFAULT 0;
+        END IF;
+      END $$;
+    `);
+
     console.log('[auto-migrate] ✓ DB column migrations applied');
   } catch (err) {
     // Non-fatal — log and continue so the server still starts
