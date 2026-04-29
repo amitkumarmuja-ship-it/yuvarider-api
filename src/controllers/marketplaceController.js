@@ -56,19 +56,32 @@ exports.getListings = async (req, res, next) => {
 // GET /marketplace/my
 exports.getMyListings = async (req, res, next) => {
   try {
-    // Also return pending request count per listing so seller sees them in the sell tab
+    // Returns all seller listings enriched with:
+    //  - pending_requests count (for active listings badge)
+    //  - buyer info (name, phone, avatar) for sold listings
     const r = await pool.query(`
       SELECT ml.*,
              u.name AS seller_name, u.avatar_url AS seller_avatar,
-             COALESCE(req_counts.pending_count, 0)::int AS pending_requests
+             COALESCE(req_counts.pending_count, 0)::int  AS pending_requests,
+             COALESCE(req_counts.total_count, 0)::int    AS total_requests,
+             -- Buyer info for sold listings (joined via marketplace_purchases)
+             buyer.name        AS buyer_name,
+             buyer.phone       AS buyer_phone,
+             buyer.avatar_url  AS buyer_avatar,
+             buyer.location    AS buyer_location,
+             mp.purchased_at,
+             mp.price_at_purchase
       FROM marketplace_listings ml
       JOIN users u ON u.id = ml.seller_id
       LEFT JOIN (
-        SELECT listing_id, COUNT(*) AS pending_count
+        SELECT listing_id,
+               COUNT(*) FILTER (WHERE status='pending') AS pending_count,
+               COUNT(*)                                  AS total_count
         FROM marketplace_purchase_requests
-        WHERE status = 'pending'
         GROUP BY listing_id
       ) req_counts ON req_counts.listing_id = ml.id
+      LEFT JOIN marketplace_purchases mp ON mp.listing_id = ml.id
+      LEFT JOIN users buyer ON buyer.id = mp.buyer_id
       WHERE ml.seller_id = $1
       ORDER BY ml.created_at DESC
     `, [req.user.id]);
