@@ -142,25 +142,6 @@ async function runAutoMigrations() {
       END $$;
     `);
 
-    // 7. Create marketplace_purchases table if it doesn't exist
-    //    Records every buyer purchase so history is preserved even if a listing is deleted.
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS marketplace_purchases (
-        id                SERIAL       PRIMARY KEY,
-        listing_id        UUID         NOT NULL,
-        buyer_id          UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        seller_id         UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        price_at_purchase NUMERIC      NOT NULL,
-        title_at_purchase TEXT         NOT NULL,
-        purchased_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-        UNIQUE(listing_id, buyer_id)
-      );
-    `);
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_mp_buyer_id  ON marketplace_purchases(buyer_id);
-      CREATE INDEX IF NOT EXISTS idx_mp_seller_id ON marketplace_purchases(seller_id);
-    `);
-
     // ── marketplace_purchase_requests table ─────────────────────────────────
     await client.query(`
       CREATE TABLE IF NOT EXISTS marketplace_purchase_requests (
@@ -182,18 +163,31 @@ async function runAutoMigrations() {
     `);
 
     // ── marketplace_purchases (accepted sale history) ────────────────────────
+    // First create the table without request_id (safe if already exists)
     await client.query(`
       CREATE TABLE IF NOT EXISTS marketplace_purchases (
         id                SERIAL       PRIMARY KEY,
         listing_id        UUID         NOT NULL,
         buyer_id          UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         seller_id         UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        request_id        INT          REFERENCES marketplace_purchase_requests(id),
         price_at_purchase NUMERIC      NOT NULL,
         title_at_purchase TEXT         NOT NULL,
         purchased_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
         UNIQUE(listing_id, buyer_id)
       );
+    `);
+    // Then add request_id column if it doesn't already exist (handles existing tables)
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='marketplace_purchases' AND column_name='request_id'
+        ) THEN
+          ALTER TABLE marketplace_purchases
+            ADD COLUMN request_id INT REFERENCES marketplace_purchase_requests(id);
+          RAISE NOTICE '[auto-migrate] marketplace_purchases.request_id column added';
+        END IF;
+      END $$;
     `);
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_mp_buyer_id  ON marketplace_purchases(buyer_id);
