@@ -31,24 +31,26 @@
 // });
 
 // module.exports = pool;
-
 const { Pool } = require('pg');
 require('dotenv').config();
 
+const isProduction = process.env.NODE_ENV === 'production';
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl:
-    process.env.NODE_ENV === 'production'
-      ? { rejectUnauthorized: false }
-      : false
+  ssl: isProduction
+    ? {
+        rejectUnauthorized: false
+      }
+    : false
 });
 
 pool.on('connect', () => {
-  console.log('PostgreSQL connected');
+  console.log('✅ PostgreSQL connected');
 });
 
 pool.on('error', (err) => {
-  console.error('DB error:', err.message);
+  console.error('❌ PostgreSQL error:', err.message);
 });
 
 module.exports = pool;
