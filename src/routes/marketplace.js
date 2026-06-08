@@ -1,6 +1,14 @@
 const router = require('express').Router();
 const ctrl   = require('../controllers/marketplaceController');
+const chat   = require('../controllers/chatController');
 const auth   = require('../middleware/auth');
+
+// ── Chat routes ──────────────────────────────────────────────────────────────
+router.get ('/chats',                       auth, chat.getMyChats);
+router.post('/chats/get-or-create',         auth, chat.getOrCreateChat);
+router.get ('/chats/:chatId/messages',      auth, chat.getMessages);
+router.post('/chats/:chatId/messages',      auth, chat.sendMessage);
+router.put ('/chats/:chatId/read',          auth, chat.markRead);
 
 // ── Named sub-paths MUST come before /:id ────────────────────────────────────
 router.get ('/requests/my',                 auth, ctrl.getMyRequests);         // buyer: all my requests
@@ -14,6 +22,7 @@ router.post('/',                            auth, ctrl.createListing);
 router.put ('/:id',                         auth, ctrl.updateListing);          // blocked if sold
 router.delete('/:id',                       auth, ctrl.deleteListing);          // blocked if sold
 router.post('/:id/mark-sold',               auth, ctrl.markSold);              // seller manual
+router.post('/:id/relist',                  auth, ctrl.relistListing);           // seller: re-activate sold listing
 
 // ── Purchase request flow ─────────────────────────────────────────────────────
 router.get ('/:id/my-request',              auth, ctrl.getMyRequestForListing); // buyer: check status

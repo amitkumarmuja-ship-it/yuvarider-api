@@ -117,3 +117,33 @@ exports.searchUsers = async (req, res, next) => {
     res.json({ success: true, users: r.rows });
   } catch (err) { next(err); }
 };
+
+// POST /api/v1/auth/interests  — save user riding interests
+exports.saveInterests = async (req, res, next) => {
+  try {
+    const { interests } = req.body;
+    if (!Array.isArray(interests) || interests.length === 0)
+      return res.status(400).json({ success: false, message: 'interests array required' });
+
+    // Upsert: delete old, insert new
+    await pool.query('DELETE FROM public.user_interests WHERE user_id=$1', [req.user.id]);
+    for (const interest of interests) {
+      await pool.query(
+        'INSERT INTO public.user_interests (user_id, interest) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+        [req.user.id, interest]
+      );
+    }
+    res.json({ success: true, message: 'Interests saved', count: interests.length });
+  } catch (err) { next(err); }
+};
+
+// GET /api/v1/auth/interests
+exports.getInterests = async (req, res, next) => {
+  try {
+    const r = await pool.query(
+      'SELECT interest FROM public.user_interests WHERE user_id=$1 ORDER BY created_at',
+      [req.user.id]
+    );
+    res.json({ success: true, interests: r.rows.map(row => row.interest) });
+  } catch (err) { next(err); }
+};
