@@ -187,43 +187,74 @@ exports.updateListing = async (req, res, next) => {
       gear_type, gear_size, gender, certification, part_type, compatible_bikes,
       image_urls, is_featured, is_hot_deal,
     } = req.body;
+    // image_urls: Array.isArray check is REQUIRED — [] is falsy in JS so
+    // `image_urls || null` would wrongly pass null and COALESCE would keep old photos.
+    // We always replace image_urls when the client sends an array (even empty).
+    const imageUrlsParam = Array.isArray(image_urls) ? image_urls : null;
+
+    // mrp: client sends explicit `null` to clear it, `undefined` means don't touch.
+    // The body parser gives us undefined when not sent, null when sent as null.
+    const mrpParam = (mrp !== undefined) ? (mrp || null) : undefined;
+
     const r = await pool.query(`
       UPDATE marketplace_listings SET
-        title          = COALESCE($1, title),
-        description    = COALESCE($2, description),
-        price          = COALESCE($3, price),
-        mrp            = COALESCE($4, mrp),
-        condition      = COALESCE($5, condition),
-        category       = COALESCE($6, category),
-        location       = COALESCE($7, location),
-        contact_pref   = COALESCE($8, contact_pref),
-        status         = COALESCE($9, status),
-        brand          = COALESCE($10, brand),
-        model          = COALESCE($11, model),
-        year           = COALESCE($12, year),
-        km_driven      = COALESCE($13, km_driven),
-        fuel_type      = COALESCE($14, fuel_type),
-        transmission   = COALESCE($15, transmission),
-        owners         = COALESCE($16, owners),
-        gear_type      = COALESCE($17, gear_type),
-        gear_size      = COALESCE($18, gear_size),
-        gender         = COALESCE($19, gender),
-        certification  = COALESCE($20, certification),
-        part_type      = COALESCE($21, part_type),
-        compatible_bikes = COALESCE($22, compatible_bikes),
-        image_urls     = COALESCE($23, image_urls),
-        is_featured    = COALESCE($24, is_featured),
-        is_hot_deal    = COALESCE($25, is_hot_deal),
+        title          = COALESCE($1,  title),
+        description    = COALESCE($2,  description),
+        price          = COALESCE($3,  price),
+        mrp            = CASE WHEN $4::boolean THEN $5::numeric ELSE mrp END,
+        condition      = COALESCE($6,  condition),
+        category       = COALESCE($7,  category),
+        location       = COALESCE($8,  location),
+        contact_pref   = COALESCE($9,  contact_pref),
+        status         = COALESCE($10, status),
+        brand          = COALESCE($11, brand),
+        model          = COALESCE($12, model),
+        year           = COALESCE($13, year),
+        km_driven      = COALESCE($14, km_driven),
+        fuel_type      = COALESCE($15, fuel_type),
+        transmission   = COALESCE($16, transmission),
+        owners         = COALESCE($17, owners),
+        gear_type      = COALESCE($18, gear_type),
+        gear_size      = COALESCE($19, gear_size),
+        gender         = COALESCE($20, gender),
+        certification  = COALESCE($21, certification),
+        part_type      = COALESCE($22, part_type),
+        compatible_bikes = COALESCE($23, compatible_bikes),
+        image_urls     = CASE WHEN $24::boolean THEN $25 ELSE image_urls END,
+        is_featured    = COALESCE($26, is_featured),
+        is_hot_deal    = COALESCE($27, is_hot_deal),
         updated_at     = NOW()
-      WHERE id = $26
+      WHERE id = $28
       RETURNING *
     `, [
-      title||null, description||null, price||null, mrp||null, condition||null,
-      category||null, location||null, contact_pref||null, status||null,
-      brand||null, model||null, year||null, km_driven||null, fuel_type||null,
-      transmission||null, owners||null, gear_type||null, gear_size||null,
-      gender||null, certification||null, part_type||null, compatible_bikes||null,
-      image_urls||null, is_featured != null ? is_featured : null,
+      title        || null,
+      description  || null,
+      price        || null,
+      // mrp: $4=shouldUpdate (bool), $5=value
+      mrp !== undefined,        // $4
+      mrp != null ? mrp : null, // $5
+      condition    || null,
+      category     || null,
+      location     || null,
+      contact_pref || null,
+      status       || null,
+      brand        || null,
+      model        || null,
+      year         || null,
+      km_driven    || null,
+      fuel_type    || null,
+      transmission || null,
+      owners       || null,
+      gear_type    || null,
+      gear_size    || null,
+      gender       || null,
+      certification || null,
+      part_type    || null,
+      compatible_bikes || null,
+      // image_urls: $24=shouldUpdate (bool), $25=array value
+      imageUrlsParam !== null,  // $24
+      imageUrlsParam || [],     // $25
+      is_featured != null ? is_featured : null,
       is_hot_deal != null ? is_hot_deal : null,
       req.params.id,
     ]);
